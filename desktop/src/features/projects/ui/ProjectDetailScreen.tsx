@@ -42,6 +42,7 @@ import {
   profilePanelViewFromSearch,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { openProjectMergeRecoveryTerminal } from "@/shared/api/projectGit";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -281,7 +282,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         description:
           error instanceof Error ? error.message : "The Git fetch failed.",
       });
+      return;
     }
+    toast.success("Remote state refreshed.");
   }, [repoSnapshotQuery, repoStateQuery, repoSyncStatusQuery]);
   // Compact branch + remote/local controls shared by the readme and Files
   // tab headers.
@@ -301,6 +304,12 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         ? "Local"
         : "Local missing",
     remoteLabel: repoSnapshotQuery.isLoading ? "Remote checking" : "Remote",
+    onCloneLocal: project?.cloneUrls[0]
+      ? () => {
+          void handleCloneRepo();
+        }
+      : undefined,
+    clonePending: cloneRepoMutation.isPending,
     canPush: repoSyncStatusQuery.data?.canPush ?? false,
     onPush: () => {
       void handlePushLocalRepo();
@@ -568,6 +577,26 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       hasLocalCheckout,
     });
   }, [activeBranch, hasLocalCheckout, openTerminal, project]);
+  const handleOpenMergeRecoveryTerminal = React.useCallback(
+    async (input: {
+      expectedCommit: string;
+      sourceBranch: string;
+      sourceCloneUrl: string;
+      targetBranch: string;
+    }) => {
+      const targetCloneUrl = project?.cloneUrls[0];
+      if (!project || !targetCloneUrl) {
+        throw new Error("No project selected.");
+      }
+      return openProjectMergeRecoveryTerminal({
+        ...input,
+        projectDtag: project.dtag,
+        reposDir: activeCommunity?.reposDir,
+        targetCloneUrl,
+      });
+    },
+    [activeCommunity?.reposDir, project],
+  );
 
   if (projectQuery.isLoading) {
     return null;
@@ -813,16 +842,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
               <WorkspaceTabs
                 key={`${project.id}:${tabsResetKey}`}
-                cloneAction={
-                  !hasLocalCheckout && project.cloneUrls[0]
-                    ? {
-                        onClone: () => {
-                          void handleCloneRepo();
-                        },
-                        pending: cloneRepoMutation.isPending,
-                      }
-                    : undefined
-                }
                 commitDiff={commitDiffQuery.data}
                 commitDiffError={commitDiffQuery.error}
                 commitDiffLoading={commitDiffQuery.isLoading}
@@ -852,6 +871,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                 onBranchChange={setSelectedBranch}
+                onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
                 onOpenTerminal={() => {
                   void handleOpenTerminal();
                 }}

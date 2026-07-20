@@ -17,6 +17,11 @@ import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
 import {
+  deriveAgentConfigFieldModel,
+  getRenderableEffortField,
+  hasRenderableAgentConfigField,
+} from "@/features/agents/lib/agentConfigCore";
+import {
   getBakedProviderInheritLabel,
   getGlobalModelFallback,
 } from "@/features/agents/ui/bakedEnvHelpers";
@@ -61,6 +66,50 @@ const BAKED_STRUCTURED_KEYS = new Set([
   BUZZ_AGENT_THINKING_EFFORT,
 ]);
 
+// Canonical behaviors (PR 2 flag cleanup). These were per-surface props;
+// onboarding's values won every call and are now the only behavior:
+// - auto-select a valid model when the provider changes
+// - keep the model select usable during discovery
+// - preserve credential env vars across provider switches (the abandoned
+//   provider's key stays in env_vars — visible/deletable under Advanced —
+//   so flipping back never loses a typed key; spawned agents may therefore
+//   see credentials for providers they don't use)
+// - require a provider before model/effort are editable (no saveable
+//   invalid state — design principle #4). Note: legacy configs saved with
+//   a model but no provider are cleared by the pre-existing orphan-model
+//   effect on next edit — deliberate data healing, documented in PR.
+const autoSelectModelOnProviderChange = true;
+const disableModelSelectDuringDiscovery = false;
+const preserveCredentialEnvVarsOnProviderChange = true;
+const requireProviderForModelAndEffort = true;
+
+/** The canonical behavior contract, exported for the contract test. */
+export const CANONICAL_CONFIG_BEHAVIORS = {
+  autoSelectModelOnProviderChange,
+  disableModelSelectDuringDiscovery,
+  preserveCredentialEnvVarsOnProviderChange,
+  requireProviderForModelAndEffort,
+} as const;
+
+/**
+ * Disclosure preset → the eight visibility decisions it owns. Effort is
+ * shown in both presets (onboarding never hid it; the old prop existed but
+ * was never flipped). Exported for the contract test.
+ */
+export function resolveDisclosure(disclosure: "full" | "onboarding-essential") {
+  const full = disclosure === "full";
+  return {
+    showAdvancedFields: full,
+    showCustomModelOption: full,
+    showCustomProviderOption: full,
+    showDescriptions: full,
+    showEffortField: true,
+    showProviderPlaceholderOption: full,
+    showRequiredIndicators: full,
+    showUnavailableEffortOptions: full,
+  } as const;
+}
+
 export type AgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -71,26 +120,23 @@ export type AgentConfigFieldsProps = {
   onCustomModelEditingChange: (value: boolean) => void;
   onIsCustomProviderChange: (value: boolean) => void;
   onValidityChange?: (valid: boolean) => void;
-  autoSelectModelOnProviderChange?: boolean;
-  disableModelSelectDuringDiscovery?: boolean;
-  effortPlaceholderLabel?: string;
-  effortLabel?: string;
-  keepSelectedModelValueLabel?: boolean;
-  modelPlaceholderLabel?: string;
   placeholderClassName?: string;
-  providerLabel?: string;
-  preserveCredentialEnvVarsOnProviderChange?: boolean;
-  requireProviderForModelAndEffort?: boolean;
   selectClassName?: string;
-  showProviderField?: boolean;
-  showAdvancedFields?: boolean;
-  showCustomModelOption?: boolean;
-  showCustomProviderOption?: boolean;
-  showDescriptions?: boolean;
-  showEffortField?: boolean;
-  showProviderPlaceholderOption?: boolean;
-  showRequiredIndicators?: boolean;
-  showUnavailableEffortOptions?: boolean;
+  /**
+   * Which disclosure preset to render (PR 2 flag cleanup — replaces eight
+   * independent show* booleans):
+   * - "full" (default): the evergreen stance — every field, escape hatch
+   *   (custom model/provider), description, required indicator, and
+   *   unavailable option is visible. Settings, defaults modal, dialogs.
+   * - "onboarding-essential": onboarding page 4's first-run stance — only
+   *   valid forward choices. No advanced section, no custom escape hatches,
+   *   no descriptions (the page copy does that job), no un-choosing via
+   *   placeholder options, no greyed-out effort levels.
+   * If a second surface wants the trimmed view, rename this value to plain
+   * "essential" — and have the conversation about whether it should really
+   * match onboarding.
+   */
+  disclosure?: "full" | "onboarding-essential";
   unstyled?: boolean;
   useCustomSelect?: boolean;
   useChevronSelectIcon?: boolean;
@@ -106,36 +152,47 @@ export function AgentConfigFields({
   onCustomModelEditingChange,
   onIsCustomProviderChange,
   onValidityChange,
-  autoSelectModelOnProviderChange = false,
-  disableModelSelectDuringDiscovery = true,
-  effortPlaceholderLabel,
-  effortLabel = "Thinking/effort",
-  keepSelectedModelValueLabel = false,
-  modelPlaceholderLabel = "Select model",
   placeholderClassName,
-  providerLabel = "LLM provider",
-  preserveCredentialEnvVarsOnProviderChange = false,
-  requireProviderForModelAndEffort = false,
   selectClassName,
-  showProviderField = true,
-  showAdvancedFields = true,
-  showCustomModelOption = true,
-  showCustomProviderOption = true,
-  showDescriptions = true,
-  showEffortField = true,
-  showProviderPlaceholderOption = true,
-  showRequiredIndicators = true,
-  showUnavailableEffortOptions = true,
+  disclosure = "full",
   unstyled = false,
   useCustomSelect = false,
   useChevronSelectIcon = false,
 }: AgentConfigFieldsProps) {
+  const {
+    showAdvancedFields,
+    showCustomModelOption,
+    showCustomProviderOption,
+    showDescriptions,
+    showEffortField,
+    showProviderPlaceholderOption,
+    showRequiredIndicators,
+    showUnavailableEffortOptions,
+  } = resolveDisclosure(disclosure);
+
+  const fieldModel = React.useMemo(
+    () =>
+      deriveAgentConfigFieldModel({
+        config,
+        runtime: selectedRuntime,
+        scope: disclosure === "onboarding-essential" ? "onboarding" : "global",
+      }),
+    [config, disclosure, selectedRuntime],
+  );
+  const effortField = getRenderableEffortField(fieldModel);
+  const effortPersistenceKey =
+    effortField?.currentPersistence.kind === "envVar"
+      ? effortField.currentPersistence.key
+      : null;
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
   );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
-  const providerFieldVisible = showProviderField;
+  const providerFieldVisible = hasRenderableAgentConfigField(
+    fieldModel,
+    "provider",
+  );
   const effectiveProvider = providerFieldVisible
     ? config.provider?.trim() || bakedProvider || ""
     : "";
@@ -206,9 +263,25 @@ export function AgentConfigFields({
     selectedRuntime,
   });
 
+  // Mount-time healing policy: onboarding page 4 edits the root config during
+  // first-run (no higher layers to inherit from), so acting on open is safe
+  // and intentional there — it heals stale state and picks a valid model.
+  // Evergreen surfaces (Settings, dialogs) edit saved data that may pair with
+  // higher layers (see PR #2148 review thread), so they only act after the
+  // user explicitly edits the provider in this session.
+  const healOnMount =
+    fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
+  const userEditedProviderRef = React.useRef(false);
+  // Read inside effects via ref so biome's exhaustive-deps stays honest:
+  // refs are stable, and healOnMount is captured at declaration.
+  const mayMutateDependentFieldsRef = React.useRef(false);
+  mayMutateDependentFieldsRef.current =
+    healOnMount || userEditedProviderRef.current;
+
   const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!autoSelectModelOnProviderChange) return;
+    if (!mayMutateDependentFieldsRef.current) return;
     const trimmedProvider = providerForDiscovery.trim();
     if (trimmedProvider.length === 0 || isCustomProvider) {
       autoSelectedModelScopeRef.current = null;
@@ -228,7 +301,6 @@ export function AgentConfigFields({
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, model: firstModel.id });
   }, [
-    autoSelectModelOnProviderChange,
     config,
     discoveredModelOptions,
     isCustomProvider,
@@ -239,9 +311,50 @@ export function AgentConfigFields({
     selectedRuntimeId,
   ]);
 
-  const currentEffortForAutoClear =
-    config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  const currentEffortForAutoClear = effortPersistenceKey
+    ? (config.env_vars[effortPersistenceKey] ?? "")
+    : "";
+
+  // When the selected harness changes outside this component (Back → setup
+  // page → choose a different harness → Next), the saved model can belong to
+  // the old harness. In onboarding, heal that stale value as soon as the new
+  // harness catalog proves it is unsupported; otherwise a Codex id like
+  // `gpt-5.5[low]` appears as a Claude Code custom model.
   React.useEffect(() => {
+    if (!healOnMount) return;
+    const currentModel = (config.model ?? "").trim();
+    if (currentModel.length === 0) return;
+    if (modelDiscoveryLoading || discoveredModelOptions === null) return;
+    if (
+      discoveredModelOptions.some((option) => option.id.trim() === currentModel)
+    ) {
+      return;
+    }
+
+    const nextEnvVars = { ...config.env_vars };
+    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    onCustomModelEditingChange(false);
+    onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
+  }, [
+    config,
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    onConfigChange,
+    onCustomModelEditingChange,
+    healOnMount,
+    effortPersistenceKey,
+  ]);
+
+  // Orphan-model clearing follows the mount-time healing policy above: the
+  // backend resolves provider and model independently across layers
+  // (agent → definition → global), so a saved global model WITHOUT a global
+  // provider can be a deliberate, working pattern (provider supplied by a
+  // higher layer). Clearing it on page-open in evergreen surfaces silently
+  // breaks that agent on its next restart — see PR #2148 review thread.
+  // Onboarding heals on open by design (discriminating spec: "gates stale
+  // saved model and effort until provider selection").
+  React.useEffect(() => {
+    if (!mayMutateDependentFieldsRef.current) return;
     if (!dependentFieldsDisabled) return;
     if (
       (config.model ?? "").trim().length === 0 &&
@@ -251,7 +364,7 @@ export function AgentConfigFields({
     }
 
     const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -260,6 +373,7 @@ export function AgentConfigFields({
     dependentFieldsDisabled,
     onConfigChange,
     onCustomModelEditingChange,
+    effortPersistenceKey,
   ]);
   const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
     config.provider ?? "",
@@ -270,12 +384,13 @@ export function AgentConfigFields({
     effortValid: effortValidForAutoClear,
     onClear: () => {
       const nextEnvVars = { ...config.env_vars };
-      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+      if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
       onConfigChange({ ...config, env_vars: nextEnvVars });
     },
   });
 
   function handleProviderChange(value: string) {
+    userEditedProviderRef.current = true;
     const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
       const nextEnvVars = { ...config.env_vars };
@@ -327,11 +442,13 @@ export function AgentConfigFields({
   }
 
   function handleEnvVarsChange(next: Record<string, string>) {
-    const effort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT];
-    const merged =
-      effort !== undefined
-        ? { ...next, [BUZZ_AGENT_THINKING_EFFORT]: effort }
-        : next;
+    const effort = effortPersistenceKey
+      ? config.env_vars[effortPersistenceKey]
+      : undefined;
+    const merged = { ...next };
+    if (effortPersistenceKey && effort !== undefined) {
+      merged[effortPersistenceKey] = effort;
+    }
     onConfigChange({ ...config, env_vars: merged });
   }
 
@@ -385,7 +502,10 @@ export function AgentConfigFields({
     : implicitEffortProvider;
   const { validValues: effortValid, defaultValue: effortDefault } =
     getProviderEffortConfig(effortProvider, config.model ?? "");
-  const currentEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  const currentEffort = effortPersistenceKey
+    ? (config.env_vars[effortPersistenceKey] ?? "")
+    : "";
+  const effortFieldVisible = showEffortField && effortField !== undefined;
 
   const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
@@ -458,7 +578,7 @@ export function AgentConfigFields({
             className={cn("text-sm font-medium", fieldLabelClassName)}
             htmlFor="global-agent-provider"
           >
-            {providerLabel}
+            Provider
           </label>
           {!useCustomSelect && useChevronSelectIcon ? (
             <div className="relative">
@@ -526,7 +646,7 @@ export function AgentConfigFields({
             fallbackModel === null &&
             !dependentFieldsDisabled
           }
-          keepSelectedModelValueLabel={keepSelectedModelValueLabel}
+          keepSelectedModelValueLabel
           model={dependentFieldsDisabled ? "" : (config.model ?? "")}
           modelDiscoveryLoading={
             dependentFieldsDisabled ? false : modelDiscoveryLoading
@@ -537,7 +657,7 @@ export function AgentConfigFields({
           onIsCustomModelEditingChange={onCustomModelEditingChange}
           onModelChange={handleModelChange}
           placeholderClassName={placeholderClassName}
-          placeholder={modelPlaceholderLabel}
+          placeholder="Select a model"
           provider={providerForDiscovery}
           fieldClassName={unstyled ? fieldClassName : undefined}
           labelClassName={fieldLabelClassName}
@@ -551,12 +671,21 @@ export function AgentConfigFields({
       </div>
 
       {/* Thinking / Effort */}
-      {showEffortField ? (
+      {effortFieldVisible ? (
         <div className={blockClassName}>
           <EffortSelectField
             currentEffort={dependentFieldsDisabled ? "" : currentEffort}
             disabled={dependentFieldsDisabled}
-            emptyOptionLabel={effortPlaceholderLabel}
+            emptyOptionLabel={
+              // Semantic, not copy: onboarding-essential hides inheritance
+              // concepts (first-run users pick, they don't inherit), so the
+              // zero option is a plain placeholder. Full disclosure leaves
+              // this unset so EffortSelectField computes the inherit/default
+              // label ("Default (medium)", "Inherit (high)", …).
+              disclosure === "onboarding-essential"
+                ? "Select effort level"
+                : undefined
+            }
             effortDefault={effortDefault}
             effortValid={effortValid}
             fieldClassName={unstyled ? fieldClassName : undefined}
@@ -565,14 +694,16 @@ export function AgentConfigFields({
               effortDefault !== null ? `Default (${effortDefault})` : undefined
             }
             inheritedEffort={bakedEffort ?? undefined}
-            label={effortLabel}
+            label="Effort"
             labelClassName={fieldLabelClassName}
             onChange={(value) => {
               const nextEnvVars = { ...config.env_vars };
               if (value === "") {
-                delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+                if (effortPersistenceKey)
+                  delete nextEnvVars[effortPersistenceKey];
               } else {
-                nextEnvVars[BUZZ_AGENT_THINKING_EFFORT] = value;
+                if (effortPersistenceKey)
+                  nextEnvVars[effortPersistenceKey] = value;
               }
               onConfigChange({ ...config, env_vars: nextEnvVars });
             }}

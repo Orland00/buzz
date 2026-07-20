@@ -4,6 +4,7 @@ import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-pr-review";
+const RECOVERY_SHOTS = "test-results/project-pr-conflict-recovery";
 const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 
@@ -54,13 +55,18 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   const header = page.getByRole("heading", { level: 3 });
   await expect(header.first()).toBeVisible();
 
-  // Owner viewing an open PR: draft toggle + approve are both offered.
+  // Owner viewing an open PR: draft toggle and both review decisions are offered.
   const convertToDraft = page.getByRole("button", {
     name: "Convert to draft",
   });
   const approve = page.getByRole("button", { name: "Approve", exact: true });
+  const requestChanges = page.getByRole("button", {
+    name: "Request changes",
+    exact: true,
+  });
   await expect(convertToDraft).toBeVisible();
   await expect(approve).toBeVisible();
+  await expect(requestChanges).toBeVisible();
 
   // Request a review from bob via the reviewers dropdown.
   await page.getByRole("button", { name: "Request", exact: true }).click();
@@ -97,8 +103,50 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
     path: `${SHOTS}/01-review-requested.png`,
   });
 
-  // Approve the PR: header flips to the approved chip and the discussion
-  // gains a compact approval timeline row.
+  // Fire opposite decisions in the same event turn. The first choice wins;
+  // the shared synchronous guard must prevent the approval from publishing.
+  await requestChanges.evaluate((requestChangesButton) => {
+    const approveButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Approve",
+    );
+    requestChangesButton.click();
+    approveButton?.click();
+  });
+  await expect(page.getByText("Changes requested.")).toBeVisible();
+  await expect(
+    page.getByText("requested changes", { exact: true }),
+  ).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(requestChanges).toHaveCount(0);
+  const changeRequestEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__
+      ?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some(
+            (tag) => tag[0] === "t" && tag[1] === "changes-requested",
+          ),
+      )
+      .at(-1),
+  );
+  expect(changeRequestEvent?.tags).toContainEqual(["c", expect.any(String)]);
+  const rapidDecisionEvents = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some(
+            (tag) =>
+              tag[0] === "t" &&
+              (tag[1] === "approval" || tag[1] === "changes-requested"),
+          ),
+      ) ?? [],
+  );
+  expect(rapidDecisionEvents).toHaveLength(1);
+
+  // Replace the completed change request with an approval. Both decisions
+  // remain tied to the current commit and their timestamps preserve order.
   await approve.click();
   await expect(page.getByText("Pull request approved.")).toBeVisible();
   await expect(page.getByText("approved these changes")).toBeVisible({
@@ -107,6 +155,19 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   await expect(
     page.getByRole("button", { name: "Approve", exact: true }),
   ).toHaveCount(0);
+  const approvalEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__
+      ?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some((tag) => tag[0] === "t" && tag[1] === "approval"),
+      )
+      .at(-1),
+  );
+  expect(approvalEvent?.tags).toContainEqual(["c", expect.any(String)]);
+  expect(approvalEvent?.createdAt).toBeGreaterThan(
+    changeRequestEvent?.createdAt ?? 0,
+  );
 
   await waitForAnimations(page);
   await page.screenshot({
@@ -205,6 +266,142 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       targetOwner: DEFAULT_MOCK_PUBKEY,
     },
   });
+});
+
+test("merge conflicts offer persistent terminal recovery", async ({ page }) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_PROJECT_MERGE_ERROR__ = {
+      code: "merge_conflict",
+      message: "Pull request has merge conflicts.",
+      recovery: {
+        action: "open_terminal",
+        sourceBranch: "feature",
+        targetBranch: "main",
+      },
+    };
+  });
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const aliceRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first();
+  await aliceRow.getByRole("button", { name: /^#/ }).click();
+  await page.getByRole("button", { name: "Merge", exact: true }).click();
+  await page.getByTestId("merge-pull-request-confirm-button").click();
+
+  const recovery = page.getByTestId("merge-conflict-recovery");
+  await expect(recovery).toBeVisible();
+  await expect(
+    recovery.getByRole("button", { name: "Copy commands" }),
+  ).toBeDisabled();
+  await waitForAnimations(page);
+  await recovery.screenshot({
+    path: `${RECOVERY_SHOTS}/01-merge-conflict.png`,
+  });
+  await recovery.getByRole("button", { name: "Resolve in Terminal" }).click();
+  await expect(
+    page.getByText("Recovery commit fetched and terminal opened."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Recovery commit fetched and terminal opened."),
+  ).toBeHidden({ timeout: 10_000 });
+  await expect(recovery).toContainText("git switch 'main'");
+  await expect(recovery).toContainText("git merge 'refs/buzz/merge-recovery/");
+  await expect(
+    recovery.getByRole("button", { name: "Copy commands" }),
+  ).toBeEnabled();
+  await waitForAnimations(page);
+  await recovery.screenshot({
+    path: `${RECOVERY_SHOTS}/02-merge-conflict-prepared.png`,
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+            (entry) => entry.command === "open_project_merge_recovery_terminal",
+          ) ?? null,
+      ),
+    )
+    .toMatchObject({
+      command: "open_project_merge_recovery_terminal",
+      payload: {
+        input: {
+          expectedCommit: expect.any(String),
+          sourceBranch: "feature",
+          targetBranch: "main",
+        },
+      },
+    });
+});
+
+test("reviewer can leave a commit-scoped inline diff comment", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const aliceRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first();
+  await aliceRow.getByRole("button", { name: /^#/ }).click();
+  await page.getByRole("tab", { name: /Files changed/ }).click();
+
+  const diffLine = page
+    .getByTestId("project-diff-line")
+    .filter({ hasText: "function CommunityTabs({ selectedCommitHash })" });
+  await expect(diffLine).toBeVisible({ timeout: 10_000 });
+  await diffLine.hover();
+  await diffLine.getByTestId("project-diff-add-comment").click();
+
+  const composer = page.getByTestId("project-inline-comment-thread");
+  await composer
+    .locator("[contenteditable='true']")
+    .fill("Please add a type for this parameter.");
+  await composer.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Line comment posted.")).toBeVisible();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+          (event) => event.content === "Please add a type for this parameter.",
+        ),
+      ),
+    )
+    .not.toBeUndefined();
+  const inlineCommentEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.content === "Please add a type for this parameter.",
+    ),
+  );
+  expect(inlineCommentEvent?.tags).toContainEqual(["t", "inline-comment"]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["c", expect.any(String)]);
+  expect(inlineCommentEvent?.tags).toContainEqual([
+    "file",
+    "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+  ]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["side", "new"]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["line", "3"]);
+  await expect(page.getByTestId("project-inline-comment")).toContainText(
+    "Please add a type for this parameter.",
+  );
+
+  await page.getByRole("tab", { name: "Conversation" }).click();
+  await expect(
+    page.getByText("Please add a type for this parameter."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("desktop/src/features/projects/ui/ProjectDetailScreen.tsx"),
+  ).toBeVisible();
 });
 
 test("managed agent repository owner can merge", async ({ page }) => {
@@ -327,13 +524,184 @@ test("viewer without repository ownership cannot merge", async ({ page }) => {
   );
 });
 
-test("project without a checkout can be cloned", async ({ page }) => {
+test("project pull requests preserve partial results from batched queries", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1619];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page
+    .getByRole("button", { name: "Pull Requests", exact: true })
+    .click();
+
+  await expect(
+    page.getByRole("button", { name: /^View / }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Some pull request details could not be loaded/),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  const workItemFilters = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__?.filter(
+        (filter) => filter.limit === 2_000,
+      ) ?? [],
+  );
+  expect(
+    workItemFilters
+      .map((filter) => JSON.stringify([...(filter.kinds ?? [])].sort()))
+      .sort(),
+  ).toEqual(
+    [[1], [1618, 1621], [1619], [1630, 1631, 1632, 1633]]
+      .map((kinds) => JSON.stringify(kinds))
+      .sort(),
+  );
+  expect(
+    workItemFilters.every((filter) => (filter["#a"]?.length ?? 0) > 1),
+  ).toBe(true);
+  const expectedRepoAddresses = [
+    `30617:${DEFAULT_MOCK_PUBKEY}:buzz`,
+    `30617:${TEST_IDENTITIES.alice.pubkey}:relay-tools`,
+    `30617:${TEST_IDENTITIES.bob.pubkey}:design-system`,
+  ].sort();
+  for (const filter of workItemFilters) {
+    expect([...(filter["#a"] ?? [])].sort()).toEqual(expectedRepoAddresses);
+  }
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByText(/Some pull request details could not be loaded/),
+  ).toHaveCount(0);
+});
+
+test("project pull requests report aggregate root query failures", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1618];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page
+    .getByRole("button", { name: "Pull Requests", exact: true })
+    .click();
+
+  await expect(page.getByText("Could not load pull requests.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByText("No pull requests yet.")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Could not load pull requests.")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^View / }).first(),
+  ).toBeVisible();
+});
+
+test("project issues preserve partial results from aggregate queries", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+
+  await expect(
+    page.getByRole("button", { name: /^View / }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Some issue details could not be loaded."),
+  ).toBeVisible();
+  await expect(page.getByText(/Missing comments\./)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByText("Some issue details could not be loaded."),
+  ).toHaveCount(0);
+});
+
+test("project overview reports aggregate work-item failures", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1618];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  await expect(
+    page.getByText("Could not load project activity."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Could not load project activity.")).toHaveCount(
+    0,
+  );
+});
+
+test("project without a checkout offers fetch feedback and dropdown cloning", async ({
+  page,
+}) => {
   await enableProjectsFeature(page);
   await installMockBridge(page);
   await openBuzzProject(page);
 
-  await page.getByRole("button", { name: "Clone", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Remote", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remote", exact: true }),
+  ).toHaveClass(/\bborder-input\/40\b/);
+  await expect(page.getByRole("button", { name: /main/ })).toHaveClass(
+    /\bborder-input\/40\b/,
+  );
+  await expect(
+    page.getByRole("button", { name: "Clone", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Fetch", exact: true }).click();
+  await expect(page.getByText("Remote state refreshed.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Remote", exact: true }).click();
+  const cloneItem = page.getByRole("menuitem", {
+    name: "Local missing Clone",
+  });
+  await expect(cloneItem.getByText("Local missing")).toHaveClass(
+    /text-muted-foreground/,
+  );
+  await expect(cloneItem.getByText("Clone", { exact: true })).toHaveClass(
+    /\bborder-input\/60\b/,
+  );
+  await cloneItem.click();
   await expect(page.getByText("Cloned repository.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Local", exact: true }),
+  ).toBeVisible();
   const commands = await page.evaluate(
     () => window.__BUZZ_E2E_COMMANDS__ ?? [],
   );

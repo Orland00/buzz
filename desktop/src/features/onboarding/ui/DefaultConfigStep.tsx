@@ -129,8 +129,12 @@ function AgentDefaultsSection({
   }, [config.preferred_runtime, selectedRuntimes]);
   const selectedRuntimeId =
     selectedRuntime?.id ?? config.preferred_runtime ?? "";
-  const selectedRuntimeSupportsModelProvider =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
+  const configSurfaceError =
+    runtimesQuery.isError ||
+    (!configSurfaceLoading &&
+      selectedRuntimeIds.length > 0 &&
+      !selectedRuntime);
   const harnessOptions = React.useMemo(
     () =>
       selectedRuntimes.map((runtime) => ({
@@ -140,34 +144,57 @@ function AgentDefaultsSection({
     [selectedRuntimes],
   );
 
-  function handleHarnessChange(runtimeId: string) {
-    const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
-    const nextProvider =
-      runtimeSupportsLlmProviderSelection(runtimeId) &&
-      config.provider !== "relay-mesh"
-        ? config.provider
-        : null;
-    const next = {
-      ...config,
-      env_vars: nextEnvVars,
-      model: null,
-      preferred_runtime: runtimeId || null,
-      provider: nextProvider,
-    };
-    setIsCustomModelEditing(false);
-    setIsCustomProvider(false);
-    setConfig(next);
-    coalescerRef.current?.enqueue(next);
-  }
+  const handleHarnessChange = React.useCallback(
+    (runtimeId: string) => {
+      const nextEnvVars = { ...config.env_vars };
+      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+      const nextProvider =
+        runtimeSupportsLlmProviderSelection(runtimeId) &&
+        config.provider !== "relay-mesh"
+          ? config.provider
+          : null;
+      const next = {
+        ...config,
+        env_vars: nextEnvVars,
+        model: null,
+        preferred_runtime: runtimeId || null,
+        provider: nextProvider,
+      };
+      setIsCustomModelEditing(false);
+      setIsCustomProvider(false);
+      setConfig(next);
+      coalescerRef.current?.enqueue(next);
+    },
+    [config],
+  );
+
+  React.useEffect(() => {
+    if (isLoading || !selectedRuntimeId) return;
+    if (config.preferred_runtime === selectedRuntimeId) return;
+
+    // The user can go Back, change which harnesses are selected, then return to
+    // this page without using this page's own harness dropdown. Reconcile that
+    // effective harness change through the same reset path so a Codex model
+    // never survives into Claude Code as a custom model (or vice versa).
+    handleHarnessChange(selectedRuntimeId);
+  }, [
+    config.preferred_runtime,
+    handleHarnessChange,
+    isLoading,
+    selectedRuntimeId,
+  ]);
 
   return (
     <section className="w-full space-y-4 text-left text-sm">
-      {isLoading ? (
+      {configSurfaceLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
           Loading…
         </div>
+      ) : configSurfaceError ? (
+        <p className="py-4 text-center text-sm text-destructive">
+          Couldn't load harness settings. Go back and try again.
+        </p>
       ) : (
         <div className="space-y-7">
           <div className="space-y-4">
@@ -195,11 +222,6 @@ function AgentDefaultsSection({
             config={config}
             isCustomModelEditing={isCustomModelEditing}
             isCustomProvider={isCustomProvider}
-            autoSelectModelOnProviderChange
-            disableModelSelectDuringDiscovery={false}
-            effortPlaceholderLabel="Select effort level"
-            keepSelectedModelValueLabel
-            modelPlaceholderLabel="Select a model"
             onConfigChange={(next) => {
               // Always apply optimistically so the UI never reverts mid-save,
               // then enqueue the persist — the coalescer serialises multiple
@@ -209,20 +231,9 @@ function AgentDefaultsSection({
             }}
             onCustomModelEditingChange={setIsCustomModelEditing}
             onIsCustomProviderChange={setIsCustomProvider}
-            preserveCredentialEnvVarsOnProviderChange
-            effortLabel="Effort"
             placeholderClassName="text-foreground/70"
-            providerLabel="Provider"
-            requireProviderForModelAndEffort
             selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
-            showAdvancedFields={false}
-            showCustomModelOption={false}
-            showCustomProviderOption={false}
-            showDescriptions={false}
-            showProviderField={selectedRuntimeSupportsModelProvider}
-            showRequiredIndicators={false}
-            showProviderPlaceholderOption={false}
-            showUnavailableEffortOptions={false}
+            disclosure="onboarding-essential"
             unstyled
             useCustomSelect
           />

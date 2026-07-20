@@ -26,28 +26,14 @@ async function setRelayConnectionState(
   page: Page,
   state: RelayConnectionState,
 ) {
-  if (state !== "connected") {
-    await page.waitForFunction(() => {
-      const win = window as Window & {
-        __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
-        __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-      };
-      return (
-        typeof win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function" &&
-        typeof win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function" &&
-        win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__() === "connected"
-      );
-    });
-  } else {
-    await page.waitForFunction(
-      () =>
-        typeof (
-          window as Window & {
-            __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-          }
-        ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
-    );
-  }
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+        }
+      ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
+  );
   await page.evaluate((nextState) => {
     const testWindow = window as Window & {
       __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (
@@ -58,6 +44,12 @@ async function setRelayConnectionState(
       testWindow.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__;
     if (!setConnectionState) {
       throw new Error("Mock relay connection state helper is not installed.");
+    }
+    // Open-relay onboarding may not start a socket before the test exercises
+    // connectivity UI. Establish the same connected baseline explicitly so a
+    // delayed mock handshake cannot overwrite the degraded state.
+    if (nextState !== "connected") {
+      setConnectionState("connected");
     }
     setConnectionState(nextState);
   }, state);
@@ -643,6 +635,7 @@ test("first-community choices expose npub and invite input", async ({
   await expectCommunityBranchFramePosition(page, joinKeyFrame);
   const joinKeyFrameBox = await joinKeyFrame.boundingBox();
   expect(joinKeyFrameBox?.width).toBeGreaterThan(700);
+  await expect(joinKeyFrame).toHaveClass(/buzz-card-textured/);
   const joinKeyFrameStyles = await joinKeyFrame.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
@@ -650,8 +643,8 @@ test("first-community choices expose npub and invite input", async ({
       borderRadius: styles.borderRadius,
     };
   });
-  expect(joinKeyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(joinKeyFrameStyles.borderRadius).toBe("12px");
+  expect(joinKeyFrameStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(joinKeyFrameStyles.borderRadius).toBe("0px");
   await expect
     .poll(() =>
       joinNpub.evaluate((element) => {
@@ -687,6 +680,7 @@ test("first-community choices expose npub and invite input", async ({
   await expectCommunityBranchFramePosition(page, inviteInputFrame);
   const inviteInputFrameBox = await inviteInputFrame.boundingBox();
   expect(inviteInputFrameBox?.width).toBeGreaterThan(700);
+  await expect(inviteInputFrame).toHaveClass(/buzz-card-textured/);
   const inviteInputFrameStyles = await inviteInputFrame.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
@@ -694,8 +688,8 @@ test("first-community choices expose npub and invite input", async ({
       borderRadius: styles.borderRadius,
     };
   });
-  expect(inviteInputFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(inviteInputFrameStyles.borderRadius).toBe("12px");
+  expect(inviteInputFrameStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(inviteInputFrameStyles.borderRadius).toBe("0px");
   await expect
     .poll(() =>
       inviteInput.evaluate((element) => {
@@ -1296,7 +1290,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
     .toEqual(["active-community", "existing-community"]);
 });
 
-test("connected first-community profile step cannot discard resumable onboarding", async ({
+test("connected first-community profile step offers equal-width Next and Back controls", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1551,9 +1545,26 @@ test("connected first-community profile step cannot discard resumable onboarding
   await page.keyboard.press("Escape");
   await expect(avatarDialog).toHaveCount(0);
   await expect(avatarButton).toBeFocused();
-  await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
-  await expect(page.getByTestId("community-profile-next")).toBeDisabled();
-  await expect(page.getByTestId("community-profile-back")).toHaveCount(0);
+  const nextButton = page.getByTestId("community-profile-next");
+  const backButton = page.getByTestId("community-profile-back");
+  await expect(nextButton).toHaveText("Next");
+  await expect(nextButton).toBeDisabled();
+  await expect(backButton).toHaveText("Back");
+  await expect(backButton).toBeEnabled();
+  const [nextBox, backBox] = await Promise.all([
+    nextButton.boundingBox(),
+    backButton.boundingBox(),
+  ]);
+  if (!nextBox || !backBox) {
+    throw new Error("Could not measure community profile navigation controls");
+  }
+  expect(Math.abs(nextBox.width - backBox.width)).toBeLessThanOrEqual(1);
+  expect(nextBox.width).toBeLessThanOrEqual(160);
+
+  await backButton.click();
+  await expect(
+    page.getByRole("heading", { name: "Request access to community" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
@@ -1561,7 +1572,7 @@ test("connected first-community profile step cannot discard resumable onboarding
         COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
       ),
     )
-    .not.toBeNull();
+    .toBeNull();
 });
 
 test("membership denial on community profile save offers recovery", async ({
@@ -2318,6 +2329,27 @@ test("existing relay profile with display name auto-completes onboarding", async
   await expectHomeView(page);
 });
 
+test("open relay skips membership gating during onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRequiresMembership: false,
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  await expect(page.getByTestId("membership-denied")).toHaveCount(0);
+});
+
 test("membership denial can import a different invited key", async ({
   page,
 }) => {
@@ -2325,6 +2357,7 @@ test("membership denial can import a different invited key", async ({
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2463,6 +2496,7 @@ test("membership denied shows all four affordances and change-community edits no
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2538,6 +2572,7 @@ test("cancel from profile Back preserves drafts and denied Back returns to inter
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2581,6 +2616,7 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },

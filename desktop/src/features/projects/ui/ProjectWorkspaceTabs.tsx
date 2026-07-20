@@ -1,6 +1,5 @@
 import {
   CircleDot,
-  Download,
   GitPullRequest,
   Plus,
   RefreshCw,
@@ -30,6 +29,7 @@ import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
 import { ActivityPanel, ContributorsPanel } from "./ProjectDetailFeedPanels";
 import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
+import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
 import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
 import {
   PullRequestDetailHeader,
@@ -47,11 +47,6 @@ import {
   type CreateIssueDialogInput,
 } from "./CreateIssueDialog";
 import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
-
-type CloneRepositoryAction = {
-  onClone: () => void;
-  pending: boolean;
-};
 
 type CreatePullRequestAction = {
   projects: Project[];
@@ -106,7 +101,6 @@ function WorkItemListHeader({
 }
 
 export function WorkspaceTabs({
-  cloneAction,
   commitDiff,
   commitDiffError,
   commitDiffLoading,
@@ -131,6 +125,7 @@ export function WorkspaceTabs({
   onSelectedPullRequestIdChange,
   onSelectedTabChange,
   onBranchChange,
+  onOpenMergeRecoveryTerminal,
   onOpenTerminal,
   snapshot,
   snapshotError,
@@ -142,7 +137,6 @@ export function WorkspaceTabs({
   terminalTitle,
   viewerGitIdentity,
 }: {
-  cloneAction?: CloneRepositoryAction;
   commitDiff: ProjectRepoDiff | null | undefined;
   commitDiffError: unknown;
   commitDiffLoading: boolean;
@@ -168,6 +162,7 @@ export function WorkspaceTabs({
   /** Reports the active tab so the screen breadcrumb can mirror it. */
   onSelectedTabChange?: (tab: string) => void;
   onBranchChange: (branch: string | null) => void;
+  onOpenMergeRecoveryTerminal?: OpenMergeRecoveryTerminal;
   onOpenTerminal?: () => void;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
@@ -268,25 +263,12 @@ export function WorkspaceTabs({
           <Button
             aria-label="Open terminal"
             className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-            onClick={onOpenTerminal}
+            onClick={() => onOpenTerminal()}
             size="icon"
             title={terminalTitle ?? "Open terminal"}
             variant="ghost"
           >
             <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
-          </Button>
-        ) : null}
-        {cloneAction ? (
-          <Button
-            className="h-8 shrink-0 gap-1.5"
-            disabled={cloneAction.pending}
-            onClick={cloneAction.onClone}
-            size="sm"
-            title="Clone repository"
-            variant="outline"
-          >
-            <Download className="h-4 w-4" />
-            {cloneAction.pending ? "Cloning…" : "Clone"}
           </Button>
         ) : null}
         {updatePullRequestAction ? (
@@ -326,6 +308,7 @@ export function WorkspaceTabs({
                     isLoading={pullRequestsLoading}
                     mode={mode}
                     onOpenCommit={onSelectedCommitHashChange}
+                    onOpenTerminal={onOpenMergeRecoveryTerminal}
                     onSelectedPullRequestIdChange={
                       onSelectedPullRequestIdChange
                     }
@@ -341,6 +324,8 @@ export function WorkspaceTabs({
                   diff={repoDiff}
                   error={repoDiffError}
                   isLoading={repoDiffLoading}
+                  profiles={profiles}
+                  project={project}
                   pullRequest={selectedPullRequest}
                 />
               </TabsContent>
@@ -418,6 +403,7 @@ export function WorkspaceTabs({
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
           onOpenCommit={onSelectedCommitHashChange}
+          onOpenTerminal={onOpenMergeRecoveryTerminal}
           onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
           profiles={profiles}
           project={project}

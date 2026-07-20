@@ -603,7 +603,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       {!isSinglePanelView ? (
         <section
           aria-label="Channel messages and composer"
-          className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           inert={channelIsCovered ? true : undefined}
           data-testid="channel-drop-zone"
           onDragEnter={
@@ -730,11 +730,11 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           ) : (
             <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:-z-10 before:h-24 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:-z-10 after:h-12 after:bg-background after:content-['']"
               data-testid="channel-composer-overlay"
               ref={composerWrapperRef}
             >
-              <div className="pointer-events-auto">
+              <div className="composer-overlay-corner-masks pointer-events-auto">
                 {timeoutState.active ? (
                   <ComposerTimeoutBanner
                     expiresAtMs={timeoutState.expiresAtMs}
