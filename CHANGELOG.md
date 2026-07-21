@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.22
+
+- fix(mesh): dedupe models + retry throttled startup channel discovery ([#2063](https://github.com/block/buzz/pull/2063)) ([`97b8b22ee`](https://github.com/block/buzz/commit/97b8b22ee976c4b13127d616e383baa64173ac62))
+- fix(desktop): keep project branches after reload ([#2214](https://github.com/block/buzz/pull/2214)) ([`001184395`](https://github.com/block/buzz/commit/001184395eacba07017b514a133aed8010ca4c73))
+- fix(git): make project branch workflows reliable ([#2213](https://github.com/block/buzz/pull/2213)) ([`166f27be4`](https://github.com/block/buzz/commit/166f27be4bc1abf2d465493bf2137353045399dc))
+- feat(desktop): manage project branches ([#2212](https://github.com/block/buzz/pull/2212)) ([`b2c38c775`](https://github.com/block/buzz/commit/b2c38c775b996edfa730302a0dbeed622d3702db))
+- feat(cli): manage repository protection rules ([#2193](https://github.com/block/buzz/pull/2193)) ([`f94324598`](https://github.com/block/buzz/commit/f94324598d84b2db9a05a3fa1f855970c4c5b575))
+
+
 ## v0.4.21
 
 - fix(desktop): clarify data deletion action ([#2208](https://github.com/block/buzz/pull/2208)) ([`e315c498`](https://github.com/block/buzz/commit/e315c4982f5ab05d05be5935a765c3047bdc076d))
