@@ -95,7 +95,13 @@ export function ReadmePanel({
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
             compact
+            createBranchDisabled={sourceControls.createBranchDisabled}
+            createBranchTitle={sourceControls.createBranchTitle}
+            deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+            deleteBranchTitle={sourceControls.deleteBranchTitle}
             onBranchChange={sourceControls.onBranchChange}
+            onCreateBranch={sourceControls.onCreateBranch}
+            onDeleteBranch={sourceControls.onDeleteBranch}
           />
           <div className="ml-auto flex shrink-0 items-center">
             <RepoSyncActionButton controls={sourceControls} />
